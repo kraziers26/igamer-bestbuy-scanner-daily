@@ -509,13 +509,13 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def apply_filter(all_data: dict, filter_key: str) -> dict:
-    """Filter and re-sort products in each category based on filter_key.
-    Uses the full pool (up to 50 products) for signal-based filters so
-    there are enough candidates to match against. Full report uses top 10.
+    """Filter products per category based on filter_key.
+    - full/selling/on_sale/hot: use category pool
+    - trending: use dedicated trending_products (fetched directly from BB signal API)
+    - viewed:   use dedicated most_viewed_products
     """
     filtered = {}
     for cat_name, cat_data in all_data.items():
-        # Use full pool for signal filters, display list for full report
         pool     = cat_data.get("pool") or cat_data["products"]
         products = cat_data["products"]  # top 10 for full report
 
@@ -523,16 +523,23 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
             result = products
 
         elif filter_key == "trending":
-            result = [p for p in pool if p.get("trending_rank") and p["trending_rank"] <= 10]
-            result.sort(key=lambda p: p.get("trending_rank") or 99)
+            # Use products fetched directly from the trendingViewed signal endpoint
+            result = cat_data.get("trending_products") or []
+            if not result:
+                # fallback: find any annotated trending items in pool
+                result = [p for p in pool if p.get("trending_rank")]
+                result.sort(key=lambda p: p.get("trending_rank") or 99)
 
         elif filter_key == "viewed":
-            result = [p for p in pool if p.get("most_viewed_rank") and p["most_viewed_rank"] <= 10]
-            result.sort(key=lambda p: p.get("most_viewed_rank") or 99)
+            # Use products fetched directly from the mostViewed signal endpoint
+            result = cat_data.get("most_viewed_products") or []
+            if not result:
+                result = [p for p in pool if p.get("most_viewed_rank")]
+                result.sort(key=lambda p: p.get("most_viewed_rank") or 99)
 
         elif filter_key == "selling":
-            result = [p for p in pool if p.get("best_seller_rank") and p["best_seller_rank"] <= 10]
-            result.sort(key=lambda p: p.get("best_seller_rank") or 99)
+            result = [p for p in pool if p.get("best_seller_rank")]
+            result.sort(key=lambda p: p.get("best_seller_rank") or 999)
 
         elif filter_key == "on_sale":
             result = [p for p in pool if p.get("onSale")]
@@ -545,7 +552,12 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
         else:
             result = products
 
-        filtered[cat_name] = {"products": result, "pool": pool}
+        filtered[cat_name] = {
+            "products":              result,
+            "pool":                  pool,
+            "trending_products":     cat_data.get("trending_products", []),
+            "most_viewed_products":  cat_data.get("most_viewed_products", []),
+        }
 
     return filtered
 
