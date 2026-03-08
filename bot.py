@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 BESTBUY_API_KEY  = os.environ.get("BESTBUY_API_KEY")
 REPORT_CHAT_ID   = os.environ.get("REPORT_CHAT_ID")      # group/channel chat ID to auto-send to
-ADMIN_ID         = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
+ADMIN_IDS        = set(
+    int(x.strip()) for x in os.environ.get("ADMIN_TELEGRAM_ID", "0").split(",")
+    if x.strip().lstrip("-").isdigit()
+)
 REPORT_HOUR_EST  = int(os.environ.get("REPORT_HOUR_EST", "8"))   # default 8am EST
 
 EST = pytz.timezone("US/Eastern")
@@ -84,7 +87,7 @@ async def send_report(app, chat_id: int | str):
 
 async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
     """Called by APScheduler every morning."""
-    chat_id = REPORT_CHAT_ID or ADMIN_ID
+    chat_id = REPORT_CHAT_ID or next(iter(ADMIN_IDS), 0)
     if not chat_id:
         logger.error("No REPORT_CHAT_ID or ADMIN_TELEGRAM_ID set — can't send scheduled report")
         return
@@ -95,7 +98,7 @@ async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
 # ── /start ────────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = update.effective_user.id == ADMIN_ID
+    is_admin = update.effective_user.id in ADMIN_IDS
     admin_block = (
         "\n\n*Admin commands:*\n"
         "/report — Send report right now\n"
@@ -120,7 +123,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /report (manual trigger) ──────────────────────────────────────────────────
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Admin only.")
         return
     chat_id = REPORT_CHAT_ID or update.effective_chat.id
@@ -130,7 +133,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /setchat ──────────────────────────────────────────────────────────────────
 
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Admin only.")
         return
     chat_id = update.effective_chat.id
@@ -150,11 +153,11 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /schedule ─────────────────────────────────────────────────────────────────
 
 async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Admin only.")
         return
 
-    chat_id = REPORT_CHAT_ID or context.bot_data.get("override_chat_id") or ADMIN_ID
+    chat_id = REPORT_CHAT_ID or context.bot_data.get("override_chat_id") or next(iter(ADMIN_IDS), 0)
     jobs = context.job_queue.jobs()
     job_list = "\n".join([f"• {j.name} — next run: {j.next_t}" for j in jobs]) if jobs else "No jobs scheduled"
 
@@ -170,7 +173,7 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /test ─────────────────────────────────────────────────────────────────────
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -194,7 +197,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /settime (admin: change schedule hour) ────────────────────────────────────
 
 async def settime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -221,7 +224,7 @@ async def settime_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await query.answer("⛔ Admin only.", show_alert=True)
         return
 
