@@ -295,7 +295,7 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
 
     ws.merge_cells(f"A2:{get_column_letter(SUMMARY_NCOLS)}2")
     c = ws["A2"]
-    filter_labels = {"full":"⚡ Full Report","trending":"🆕 Fresh Deals","viewed":"🛒 BB Best Sellers","selling":"🛒 Best Sellers","on_sale":"💰 On Sale Only","hot":"🔴 HOT BUYS Only"}
+    filter_labels = {"full":"📦 Established Deals","trending":"🆕 Fresh Deals","viewed":"🛒 Best Sellers","selling":"🛒 Best Sellers","on_sale":"💰 On Sale Only","hot":"🔴 HOT BUYS Only"}
     filter_label = filter_labels.get(filter_key, "⚡ Full Report")
     c.value     = (f"Generated: {ts}   •   Filter: {filter_label}   •   Live data from Best Buy Products & Recommendations API")
     c.font      = Font(name="Arial", size=9, italic=True, color=C_WHITE)
@@ -547,11 +547,9 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
                 result = sorted(pool, key=lambda p: signal_score(p), reverse=True)
 
         elif filter_key == "viewed":
-            # Category Bestsellers — from BB mostPopular endpoint
-            result = cat_data.get("bs_products") or []
-            if not result:
-                result = [p for p in pool if p.get("best_seller_rank")]
-                result.sort(key=lambda p: p.get("best_seller_rank") or 9999)
+            # Redirect to selling — both now use global bestSellingRank
+            result = [p for p in pool if p.get("best_seller_rank")]
+            result.sort(key=lambda p: p.get("best_seller_rank") or 9999)
 
         elif filter_key == "selling":
             result = [p for p in pool if p.get("best_seller_rank")]
@@ -572,7 +570,6 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
             "products":       result,
             "pool":           pool,
             "fresh_products": cat_data.get("fresh_products", []),
-            "bs_products":    cat_data.get("bs_products", []),
         }
 
     return filtered
