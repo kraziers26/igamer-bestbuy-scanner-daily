@@ -97,7 +97,11 @@ class BBFetcher:
                     return []
                 data = await resp.json()
                 products = data.get("products", [])
-                logger.info(f"  {name}: {len(products)} products in pool")
+                # Exclude refurbished, open-box, pre-owned by name
+                exclude = ("refurbished", "open-box", "open box", "pre-owned", "preowned", "renewed")
+                products = [p for p in products
+                            if not any(w in (p.get("name") or "").lower() for w in exclude)]
+                logger.info(f"  {name}: {len(products)} products in pool (non-refurb)")
                 return products
         except Exception as e:
             logger.error(f"Fetch error [{name}]: {e}")
