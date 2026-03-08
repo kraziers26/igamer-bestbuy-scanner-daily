@@ -259,7 +259,7 @@ def section_hdr(ws, row: int, text: str, color: str = C_NAVY) -> int:
     return row + 1
 
 
-def build_summary_sheet(wb, all_data: dict, ts: str):
+def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
     ws = wb.create_sheet("📊 SUMMARY", 0)
 
     # Set column widths once (summary uses up to col 12)
@@ -278,9 +278,9 @@ def build_summary_sheet(wb, all_data: dict, ts: str):
 
     ws.merge_cells(f"A2:{get_column_letter(SUMMARY_NCOLS)}2")
     c = ws["A2"]
-    c.value     = (f"Generated: {ts}   •   "
-                   "Live data from Best Buy Products & Recommendations API   •   "
-                   "Top 10 per category by Best Seller Rank")
+    filter_labels = {"full":"⚡ Full Report","trending":"🔥 Trending Now","viewed":"👁 Most Viewed","selling":"🛒 Best Sellers","on_sale":"💰 On Sale Only","hot":"🔴 HOT BUYS Only"}
+    filter_label = filter_labels.get(filter_key, "⚡ Full Report")
+    c.value     = (f"Generated: {ts}   •   Filter: {filter_label}   •   Live data from Best Buy Products & Recommendations API")
     c.font      = Font(name="Arial", size=9, italic=True, color=C_WHITE)
     c.fill      = fill(C_MID_BLUE)
     c.alignment = Alignment(horizontal="center", vertical="center")
@@ -508,7 +508,41 @@ def build_summary_sheet(wb, all_data: dict, ts: str):
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def build_report(all_data: dict) -> str:
+def apply_filter(all_data: dict, filter_key: str) -> dict:
+    """Filter and re-sort products in each category based on filter_key."""
+    if filter_key == "full":
+        return all_data
+
+    filtered = {}
+    for cat_name, cat_data in all_data.items():
+        products = cat_data["products"]
+
+        if filter_key == "trending":
+            products = [p for p in products if p.get("trending_rank") and p["trending_rank"] <= 10]
+            products.sort(key=lambda p: p.get("trending_rank") or 99)
+
+        elif filter_key == "viewed":
+            products = [p for p in products if p.get("most_viewed_rank") and p["most_viewed_rank"] <= 10]
+            products.sort(key=lambda p: p.get("most_viewed_rank") or 99)
+
+        elif filter_key == "selling":
+            products = [p for p in products if p.get("best_seller_rank") and p["best_seller_rank"] <= 10]
+            products.sort(key=lambda p: p.get("best_seller_rank") or 99)
+
+        elif filter_key == "on_sale":
+            products = [p for p in products if p.get("onSale")]
+            products.sort(key=lambda p: float(p.get("percentSavings") or 0), reverse=True)
+
+        elif filter_key == "hot":
+            products = [p for p in products if signal_score(p) >= 9 and p.get("onSale")]
+            products.sort(key=lambda p: signal_score(p), reverse=True)
+
+        filtered[cat_name] = {"products": products}
+
+    return filtered
+
+
+def build_report(all_data: dict, filter_key: str = "full") -> str:
     """Build the full Excel workbook from live BB data. Returns the file path."""
     est = pytz.timezone("US/Eastern")
     now = datetime.now(est)
@@ -517,9 +551,10 @@ def build_report(all_data: dict) -> str:
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    build_summary_sheet(wb, all_data, ts)
+    display_data = apply_filter(all_data, filter_key)
+    build_summary_sheet(wb, display_data, ts, filter_key=filter_key)
 
-    for cat_name, cat_data in all_data.items():
+    for cat_name, cat_data in display_data.items():
         build_category_sheet(wb, cat_name, cat_data["products"], ts)
 
     stamp    = now.strftime("%Y%m%d_%H%M")
