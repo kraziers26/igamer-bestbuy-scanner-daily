@@ -1,0 +1,161 @@
+import aiohttp
+import asyncio
+import logging
+import urllib.parse
+
+logger = logging.getLogger(__name__)
+
+BB_BASE = "https://api.bestbuy.com/v1"
+
+# Categories to pull — (display_name, category_id)
+CATEGORIES = [
+    ("Gaming Desktops",  "pcmcat287600050002"),
+    ("Gaming Laptops",   "pcmcat287600050003"),
+    ("MacBooks",         "pcmcat247400050001"),
+    ("All-in-One PCs",   "abcat0501005"),
+    ("Windows Laptops",  "pcmcat247400050000"),
+]
+
+# Market signal endpoints
+SIGNAL_ENDPOINTS = {
+    "trendingViewed": "trendingViewed",
+    "mostViewed":     "mostViewed",
+    "bestSeller":     "mostPopular",
+}
+
+# Fields to pull per product
+SHOW_FIELDS = ",".join([
+    "sku", "name", "manufacturer", "salePrice", "regularPrice",
+    "dollarSavings", "percentSavings", "onSale", "onlineAvailability",
+    "url", "bestSellingRank", "priceUpdateDate"
+])
+
+
+class BBFetcher:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def fetch_all(self) -> dict:
+        """
+        Returns dict keyed by category name:
+        {
+          "Gaming Desktops": {
+              "products": [...],          # top 10 by best seller rank
+              "trending": [...],          # sku list in trending order
+              "most_viewed": [...],       # sku list
+          },
+          ...
+        }
+        """
+        async with aiohttp.ClientSession() as session:
+            # Fetch categories and signals concurrently
+            category_tasks = [
+                self._fetch_category(session, name, cat_id)
+                for name, cat_id in CATEGORIES
+            ]
+            signal_tasks = [
+                self._fetch_signals(session, name, cat_id)
+                for name, cat_id in CATEGORIES
+            ]
+
+            cat_results    = await asyncio.gather(*category_tasks, return_exceptions=True)
+            signal_results = await asyncio.gather(*signal_tasks,   return_exceptions=True)
+
+        output = {}
+        for i, (name, _) in enumerate(CATEGORIES):
+            products = cat_results[i]    if not isinstance(cat_results[i],    Exception) else []
+            signals  = signal_results[i] if not isinstance(signal_results[i], Exception) else {}
+
+            if isinstance(cat_results[i], Exception):
+                logger.error(f"Category fetch failed [{name}]: {cat_results[i]}")
+            if isinstance(signal_results[i], Exception):
+                logger.error(f"Signal fetch failed [{name}]: {signal_results[i]}")
+
+            # Merge signal ranks into product records
+            trending_skus   = signals.get("trendingViewed", [])
+            most_viewed_skus = signals.get("mostViewed",    [])
+
+            trending_rank   = {sku: rank+1 for rank, sku in enumerate(trending_skus)}
+            most_viewed_rank = {sku: rank+1 for rank, sku in enumerate(most_viewed_skus)}
+
+            for p in products:
+                sku = p.get("sku")
+                tr = trending_rank.get(sku)
+                mv = most_viewed_rank.get(sku)
+                bs = p.get("bestSellingRank")
+                p["trending_rank"]    = tr
+                p["most_viewed_rank"] = mv
+                p["best_seller_rank"] = bs
+
+                # Friendly signal display strings
+                p["trending_str"]    = f"🔥 #{tr}" if tr and tr <= 10 else "—"
+                p["most_viewed_str"] = f"👁 #{mv}" if mv and mv <= 10 else "—"
+                p["best_seller_str"] = f"🛒 #{bs}" if bs and bs <= 10 else "—"
+
+            output[name] = {"products": products}
+
+        return output
+
+    async def _fetch_category(self, session, name: str, cat_id: str) -> list:
+        """Fetch top 10 products in a category sorted by best seller rank."""
+        url = f"{BB_BASE}/products(categoryPath.id={cat_id}&onlineAvailabilityType=available)"
+        params = {
+            "apiKey":   self.api_key,
+            "format":   "json",
+            "show":     SHOW_FIELDS,
+            "sort":     "bestSellingRank.asc",
+            "pageSize": "10",
+        }
+        logger.info(f"Fetching category: {name} ({cat_id})")
+        try:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    txt = await resp.text()
+                    logger.error(f"BB API {resp.status} for {name}: {txt[:200]}")
+                    return []
+                data = await resp.json()
+                products = data.get("products", [])
+                logger.info(f"  {name}: {len(products)} products")
+                return products
+        except Exception as e:
+            logger.error(f"Fetch error [{name}]: {e}")
+            return []
+
+    async def _fetch_signals(self, session, name: str, cat_id: str) -> dict:
+        """Fetch trending + most viewed SKU lists for a category."""
+        signals = {}
+        endpoints = {
+            "trendingViewed": f"{BB_BASE}/products/trendingViewed(categoryId={cat_id})",
+            "mostViewed":     f"{BB_BASE}/products/mostViewed(categoryId={cat_id})",
+        }
+        params = {
+            "apiKey":   self.api_key,
+            "format":   "json",
+            "show":     "sku,rank",
+            "pageSize": "10",
+        }
+        for signal_name, url in endpoints.items():
+            try:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Recommendations API returns results under different keys
+                        items = (data.get("results") or data.get("products") or [])
+                        signals[signal_name] = [item.get("sku") for item in items if item.get("sku")]
+                        logger.info(f"  {name} {signal_name}: {len(signals[signal_name])} SKUs")
+                    else:
+                        logger.warning(f"Signal {signal_name} [{name}] returned {resp.status}")
+                        signals[signal_name] = []
+            except Exception as e:
+                logger.warning(f"Signal fetch error [{name}/{signal_name}]: {e}")
+                signals[signal_name] = []
+        return signals
+
+    async def test_connection(self) -> tuple:
+        """Quick connectivity check. Returns (success, count_or_error, sample_name)."""
+        async with aiohttp.ClientSession() as session:
+            name, cat_id = CATEGORIES[0]
+            products = await self._fetch_category(session, name, cat_id)
+            if products:
+                return True, len(products), products[0].get("name", "—")[:60]
+            return False, "No products returned", ""
