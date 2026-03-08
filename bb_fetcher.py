@@ -82,12 +82,11 @@ class BBFetcher:
     async def _fetch_category(self, session, name: str, cat_id: str) -> list:
         url = f"{BB_BASE}/products(categoryPath.id={cat_id})"
         params = {
-            "apiKey":    self.api_key,
-            "format":    "json",
-            "show":      SHOW_FIELDS,
-            "sort":      "bestSellingRank.asc",
-            "pageSize":  str(POOL_SIZE),
-            "condition": "New",
+            "apiKey":   self.api_key,
+            "format":   "json",
+            "show":     SHOW_FIELDS,
+            "sort":     "bestSellingRank.asc",
+            "pageSize": str(POOL_SIZE),
         }
         logger.info(f"Fetching category: {name} ({cat_id}) — pool size {POOL_SIZE}")
         try:
