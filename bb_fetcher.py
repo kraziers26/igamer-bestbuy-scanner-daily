@@ -98,7 +98,7 @@ class BBFetcher:
 
     async def _fetch_category(self, session, name: str, cat_id: str) -> list:
         """Fetch top 10 products in a category sorted by best seller rank."""
-        url = f"{BB_BASE}/products(categoryPath.id={cat_id}&onlineAvailabilityType=available)"
+        url = f"{BB_BASE}/products(categoryPath.id={cat_id})"
         params = {
             "apiKey":   self.api_key,
             "format":   "json",
@@ -155,7 +155,23 @@ class BBFetcher:
         """Quick connectivity check. Returns (success, count_or_error, sample_name)."""
         async with aiohttp.ClientSession() as session:
             name, cat_id = CATEGORIES[0]
-            products = await self._fetch_category(session, name, cat_id)
-            if products:
-                return True, len(products), products[0].get("name", "—")[:60]
-            return False, "No products returned", ""
+            # Test with a simple search query first to verify API key works
+            url = f"{BB_BASE}/products(search=laptop)"
+            params = {"apiKey": self.api_key, "format": "json", "show": "sku,name,salePrice", "pageSize": "3"}
+            try:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 403:
+                        return False, "API key invalid or rate limited (403)", ""
+                    if resp.status != 200:
+                        txt = await resp.text()
+                        return False, f"HTTP {resp.status}: {txt[:100]}", ""
+                    data = await resp.json()
+                    products = data.get("products", [])
+                    if products:
+                        # Now test category fetch
+                        cat_products = await self._fetch_category(session, name, cat_id)
+                        sample = products[0].get("name", "—")[:60]
+                        return True, len(products), f"{sample} | Category [{name}]: {len(cat_products)} products"
+                    return False, "API connected but no products returned", ""
+            except Exception as e:
+                return False, f"Connection error: {e}", ""
