@@ -98,7 +98,7 @@ class BBFetcher:
 
     async def _fetch_category(self, session, name: str, cat_id: str) -> list:
         """Fetch top 10 products in a category sorted by best seller rank."""
-        url = f"{BB_BASE}/products(categoryPath.id={cat_id})"
+        url = f"{BB_BASE}/products(categoryPath.id={cat_id}&condition=New)"
         params = {
             "apiKey":   self.api_key,
             "format":   "json",
