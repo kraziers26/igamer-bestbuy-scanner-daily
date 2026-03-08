@@ -1,374 +1,222 @@
-import os
-import logging
+import aiohttp
 import asyncio
-from datetime import time as dtime
-import pytz
+import logging
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler
-)
-
-from bb_fetcher import BBFetcher
-from report_builder import build_report
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
-BESTBUY_API_KEY = os.environ.get("BESTBUY_API_KEY")
-REPORT_CHAT_ID  = os.environ.get("REPORT_CHAT_ID")
-ADMIN_IDS       = set(
-    int(x.strip()) for x in os.environ.get("ADMIN_TELEGRAM_ID", "0").split(",")
-    if x.strip().lstrip("-").isdigit()
-)
-REPORT_HOUR_EST = int(os.environ.get("REPORT_HOUR_EST", "8"))
+BB_BASE = "https://api.bestbuy.com/v1"
 
-EST = pytz.timezone("US/Eastern")
-fetcher = BBFetcher(BESTBUY_API_KEY)
+CATEGORIES = [
+    ("Gaming Desktops",  "pcmcat287600050002"),
+    ("Gaming Laptops",   "pcmcat287600050003"),
+    ("MacBooks",         "pcmcat247400050001"),
+    ("All-in-One PCs",   "abcat0501005"),
+    ("Windows Laptops",  "pcmcat247400050000"),
+]
 
-PICK_FILTER = 0
+SHOW_FIELDS = ",".join([
+    "sku", "name", "manufacturer", "salePrice", "regularPrice",
+    "dollarSavings", "percentSavings", "onSale", "onlineAvailability",
+    "url", "bestSellingRank", "priceUpdateDate"
+])
 
-FILTERS = {
-    "full":     ("⚡ Full Report",     "Everything — all categories, all products, full Excel"),
-    "trending": ("🔥 Trending Now",    "Products spiking in page views in the last 3 hours"),
-    "viewed":   ("👁 Most Viewed",     "Products with highest sustained views over 48 hours"),
-    "selling":  ("🛒 Best Sellers",    "Products ranked by actual purchases over the last 7 days"),
-    "on_sale":  ("💰 On Sale Only",    "Only products currently discounted — sorted by best % off"),
-    "hot":      ("🔴 HOT BUYS Only",  "Products that are on sale AND have all 3 signals firing"),
-}
+POOL_SIZE    = 50
+DISPLAY_SIZE = 10
+
+EXCLUDE_WORDS = ("refurbished", "open-box", "open box", "pre-owned", "preowned", "renewed")
+
+def is_new(p: dict) -> bool:
+    return not any(w in (p.get("name") or "").lower() for w in EXCLUDE_WORDS)
 
 
-async def send_report(app, chat_id, filter_key="full", triggered_by="scheduled"):
-    label, description = FILTERS.get(filter_key, FILTERS["full"])
-    source = "📅 Scheduled" if triggered_by == "scheduled" else "⚡ On-Demand"
-    try:
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"📊 *iGamer Market Report — {label}*\n\n"
-                f"_{description}_\n\n"
-                f"⏳ Pulling live Best Buy data... give me 30 seconds."
-            ),
-            parse_mode="Markdown"
-        )
-        data = await fetcher.fetch_all()
-        path = build_report(data, filter_key=filter_key)
-        filter_notes = {
-            "full":     "• All categories — full market snapshot",
-            "trending": "• Filtered to products trending in last 3hrs\n• Sorted by trending rank",
-            "viewed":   "• Filtered to most viewed products over 48hrs\n• Sorted by view rank",
-            "selling":  "• Filtered to top selling products over 7 days\n• Sorted by sales rank",
-            "on_sale":  "• On-sale products only\n• Sorted by best % discount",
-            "hot":      "• 🔴 HOT BUYS only — on sale + all 3 signals firing",
+class BBFetcher:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def fetch_all(self) -> dict:
+        async with aiohttp.ClientSession() as session:
+            # Run all category + signal fetches concurrently
+            category_tasks = [
+                self._fetch_category(session, name, cat_id)
+                for name, cat_id in CATEGORIES
+            ]
+            signal_tasks = [
+                self._fetch_signal_products(session, name, cat_id)
+                for name, cat_id in CATEGORIES
+            ]
+            cat_results    = await asyncio.gather(*category_tasks, return_exceptions=True)
+            signal_results = await asyncio.gather(*signal_tasks,   return_exceptions=True)
+
+        output = {}
+        for i, (name, _) in enumerate(CATEGORIES):
+            cat_products = cat_results[i]    if not isinstance(cat_results[i],    Exception) else []
+            sig_data     = signal_results[i] if not isinstance(signal_results[i], Exception) else {}
+
+            if isinstance(cat_results[i],    Exception): logger.error(f"Category fetch failed [{name}]: {cat_results[i]}")
+            if isinstance(signal_results[i], Exception): logger.error(f"Signal fetch failed [{name}]: {signal_results[i]}")
+
+            # Signal products come back with full details + rank already set
+            trending_products    = sig_data.get("trendingViewed", [])
+            most_viewed_products = sig_data.get("mostViewed",     [])
+
+            # Build SKU lookup maps for cross-referencing
+            trending_rank    = {p["sku"]: p["trending_rank"]    for p in trending_products    if p.get("sku")}
+            most_viewed_rank = {p["sku"]: p["most_viewed_rank"] for p in most_viewed_products if p.get("sku")}
+
+            # Annotate category pool products with signal ranks
+            for p in cat_products:
+                sku = p.get("sku")
+                tr  = trending_rank.get(sku)
+                mv  = most_viewed_rank.get(sku)
+                bs  = p.get("bestSellingRank")
+                p["trending_rank"]    = tr
+                p["most_viewed_rank"] = mv
+                p["best_seller_rank"] = bs
+                p["trending_str"]     = f"🔥 #{tr}" if tr else "—"
+                p["most_viewed_str"]  = f"👁 #{mv}" if mv else "—"
+                p["best_seller_str"]  = f"🛒 #{bs}" if bs and bs <= 50 else "—"
+
+            # Annotate signal products that aren't already in category pool
+            cat_skus = {p.get("sku") for p in cat_products}
+            for p in trending_products + most_viewed_products:
+                if p.get("sku") not in cat_skus:
+                    bs = p.get("bestSellingRank")
+                    p.setdefault("best_seller_rank", bs)
+                    p["best_seller_str"] = f"🛒 #{bs}" if bs and bs <= 50 else "—"
+
+            output[name] = {
+                "products":          cat_products[:DISPLAY_SIZE],  # top 10 for full report
+                "pool":              cat_products,                  # full 50 for on_sale / hot filters
+                "trending_products": trending_products,             # direct signal products
+                "most_viewed_products": most_viewed_products,
+            }
+
+        return output
+
+    async def _fetch_category(self, session, name: str, cat_id: str) -> list:
+        """Fetch top POOL_SIZE products by best seller rank for a category."""
+        url    = f"{BB_BASE}/products(categoryPath.id={cat_id})"
+        params = {
+            "apiKey":   self.api_key,
+            "format":   "json",
+            "show":     SHOW_FIELDS,
+            "sort":     "bestSellingRank.asc",
+            "pageSize": str(POOL_SIZE),
         }
-        caption = (
-            f"{source} | *iGamer Corp — BB Market Intelligence*\n\n"
-            f"*Filter: {label}*\n"
-            f"{filter_notes.get(filter_key, '')}\n\n"
-            f"_Tap any 🛒 Buy Now link to purchase directly on Best Buy_"
-        )
-        with open(path, "rb") as f:
-            await app.bot.send_document(
-                chat_id=chat_id, document=f,
-                filename=os.path.basename(path),
-                caption=caption, parse_mode="Markdown"
-            )
+        logger.info(f"Fetching category: {name} ({cat_id})")
         try:
-            os.remove(path)
-        except Exception:
-            pass
-        logger.info(f"Report [{filter_key}] delivered to {chat_id}")
-    except Exception as e:
-        logger.error(f"Report failed [{filter_key}]: {e}")
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=f"❌ *Report failed:* `{str(e)}`\nCheck Railway logs.",
-            parse_mode="Markdown"
-        )
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    txt = await resp.text()
+                    logger.error(f"BB API {resp.status} for {name}: {txt[:200]}")
+                    return []
+                data     = await resp.json()
+                products = [p for p in data.get("products", []) if is_new(p)]
+                logger.info(f"  {name}: {len(products)} products")
+                return products
+        except Exception as e:
+            logger.error(f"Fetch error [{name}]: {e}")
+            return []
 
+    async def _fetch_signal_products(self, session, name: str, cat_id: str) -> dict:
+        """
+        Fetch trending + most viewed SKUs, then immediately look up full
+        product details for those SKUs so signal filters have real data.
+        """
+        sig_endpoints = {
+            "trendingViewed": f"{BB_BASE}/products/trendingViewed(categoryId={cat_id})",
+            "mostViewed":     f"{BB_BASE}/products/mostViewed(categoryId={cat_id})",
+        }
+        sig_params = {
+            "apiKey":   self.api_key,
+            "format":   "json",
+            "show":     "sku,rank",
+            "pageSize": "10",
+        }
 
-def filter_keyboard(prefix):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⚡ Full Report",    callback_data=f"{prefix}_full"),
-            InlineKeyboardButton("🔴 HOT BUYS Only", callback_data=f"{prefix}_hot"),
-        ],
-        [
-            InlineKeyboardButton("🔥 Trending Now",  callback_data=f"{prefix}_trending"),
-            InlineKeyboardButton("👁 Most Viewed",   callback_data=f"{prefix}_viewed"),
-        ],
-        [
-            InlineKeyboardButton("🛒 Best Sellers",  callback_data=f"{prefix}_selling"),
-            InlineKeyboardButton("💰 On Sale Only",  callback_data=f"{prefix}_on_sale"),
-        ],
-        [InlineKeyboardButton("❌ Cancel",           callback_data=f"{prefix}_cancel")],
-    ])
+        result = {}
+        for sig_name, sig_url in sig_endpoints.items():
+            try:
+                async with session.get(sig_url, params=sig_params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Signal {sig_name} [{name}] returned {resp.status}")
+                        result[sig_name] = []
+                        continue
 
+                    data  = await resp.json()
+                    items = data.get("results") or data.get("products") or []
+                    # Build ordered SKU list with ranks
+                    ranked_skus = [(item.get("sku"), item.get("rank", idx+1))
+                                   for idx, item in enumerate(items) if item.get("sku")]
 
-# ── /report ───────────────────────────────────────────────────────────────────
+                    if not ranked_skus:
+                        result[sig_name] = []
+                        continue
 
-async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only.")
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "📊 *Pull a Report — Choose Filter*\n\nWhat type of deals do you want?",
-        reply_markup=filter_keyboard("rep"),
-        parse_mode="Markdown"
-    )
-    return PICK_FILTER
+                    # Fetch full product details for these SKUs in one call
+                    sku_filter = ",".join(str(s) for s, _ in ranked_skus)
+                    prod_url   = f"{BB_BASE}/products(sku in({sku_filter}))"
+                    prod_params = {
+                        "apiKey":   self.api_key,
+                        "format":   "json",
+                        "show":     SHOW_FIELDS,
+                        "pageSize": "10",
+                    }
+                    async with session.get(prod_url, params=prod_params, timeout=aiohttp.ClientTimeout(total=15)) as presp:
+                        if presp.status != 200:
+                            logger.warning(f"Product lookup failed for {sig_name} [{name}]: {presp.status}")
+                            result[sig_name] = []
+                            continue
+                        pdata    = await presp.json()
+                        products = [p for p in pdata.get("products", []) if is_new(p)]
 
-async def report_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if update.effective_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Admin only.", show_alert=True)
-        return ConversationHandler.END
-    filter_key = query.data.replace("rep_", "")
-    if filter_key == "cancel":
-        await query.edit_message_text("❌ Cancelled.")
-        return ConversationHandler.END
-    label, description = FILTERS.get(filter_key, FILTERS["full"])
-    await query.edit_message_text(
-        f"✅ *{label}*\n_{description}_\n\n⏳ Building your report...",
-        parse_mode="Markdown"
-    )
-    chat_id = REPORT_CHAT_ID or update.effective_chat.id
-    await send_report(context.application, int(chat_id), filter_key=filter_key, triggered_by="on_demand")
-    return ConversationHandler.END
+                    # Attach rank and signal fields
+                    rank_map = {str(sku): rank for sku, rank in ranked_skus}
+                    rank_key = "trending_rank" if sig_name == "trendingViewed" else "most_viewed_rank"
+                    str_key  = "trending_str"  if sig_name == "trendingViewed" else "most_viewed_str"
+                    other_rank_key = "most_viewed_rank" if sig_name == "trendingViewed" else "trending_rank"
+                    other_str_key  = "most_viewed_str"  if sig_name == "trendingViewed" else "trending_str"
 
+                    for p in products:
+                        sku  = str(p.get("sku", ""))
+                        rank = rank_map.get(sku, 99)
+                        bs   = p.get("bestSellingRank")
+                        p[rank_key]       = rank
+                        p[str_key]        = f"🔥 #{rank}" if sig_name == "trendingViewed" else f"👁 #{rank}"
+                        p[other_rank_key] = None
+                        p[other_str_key]  = "—"
+                        p["best_seller_rank"] = bs
+                        p["best_seller_str"]  = f"🛒 #{bs}" if bs and bs <= 50 else "—"
 
-# ── /setschedule ──────────────────────────────────────────────────────────────
+                    # Sort by rank
+                    products.sort(key=lambda p: p.get(rank_key) or 99)
+                    result[sig_name] = products
+                    logger.info(f"  {name} {sig_name}: {len(products)} products with full details")
 
-async def setschedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only.")
-        return ConversationHandler.END
-    current_filter = context.bot_data.get("scheduled_filter", "full")
-    current_hour   = context.bot_data.get("scheduled_hour", REPORT_HOUR_EST)
-    current_label  = FILTERS.get(current_filter, FILTERS["full"])[0]
-    display_hour   = f"{current_hour}:00 AM" if current_hour < 12 else ("12:00 PM" if current_hour == 12 else f"{current_hour-12}:00 PM")
-    await update.message.reply_text(
-        f"⚙️ *Configure Scheduled Report*\n\n"
-        f"Current: *{display_hour} EST* — *{current_label}*\n\n"
-        f"*Step 1 — Choose what the scheduled report will focus on:*",
-        reply_markup=filter_keyboard("sch"),
-        parse_mode="Markdown"
-    )
-    return PICK_FILTER
+            except Exception as e:
+                logger.warning(f"Signal product fetch error [{name}/{sig_name}]: {e}")
+                result[sig_name] = []
 
-async def schedule_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if update.effective_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Admin only.", show_alert=True)
-        return ConversationHandler.END
-    filter_key = query.data.replace("sch_", "")
-    if filter_key == "cancel":
-        await query.edit_message_text("❌ Cancelled.")
-        return ConversationHandler.END
-    context.bot_data["scheduled_filter"] = filter_key
-    label, _ = FILTERS.get(filter_key, FILTERS["full"])
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("6 AM",  callback_data="schtime_6"),
-            InlineKeyboardButton("7 AM",  callback_data="schtime_7"),
-            InlineKeyboardButton("8 AM",  callback_data="schtime_8"),
-            InlineKeyboardButton("9 AM",  callback_data="schtime_9"),
-        ],
-        [
-            InlineKeyboardButton("10 AM", callback_data="schtime_10"),
-            InlineKeyboardButton("11 AM", callback_data="schtime_11"),
-            InlineKeyboardButton("12 PM", callback_data="schtime_12"),
-            InlineKeyboardButton("1 PM",  callback_data="schtime_13"),
-        ],
-    ])
-    await query.edit_message_text(
-        f"✅ Filter set: *{label}*\n\n*Step 2 — What time should this send every day? (EST)*",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-    return PICK_FILTER
+        return result
 
-async def schedule_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if update.effective_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Admin only.", show_alert=True)
-        return ConversationHandler.END
-    hour       = int(query.data.replace("schtime_", ""))
-    filter_key = context.bot_data.get("scheduled_filter", "full")
-    label, _   = FILTERS.get(filter_key, FILTERS["full"])
-    for job in context.job_queue.get_jobs_by_name("daily_report"):
-        job.schedule_removal()
-    context.job_queue.run_daily(
-        scheduled_report,
-        time=dtime(hour=hour, minute=0, tzinfo=EST),
-        name="daily_report",
-        data={"filter_key": filter_key}
-    )
-    context.bot_data["scheduled_hour"] = hour
-    display_hour = f"{hour}:00 AM" if hour < 12 else ("12:00 PM" if hour == 12 else f"{hour-12}:00 PM")
-    await query.edit_message_text(
-        f"✅ *Schedule Updated!*\n\n"
-        f"⏰ Time: *{display_hour} EST* (daily)\n"
-        f"📊 Filter: *{label}*\n\n"
-        f"⚠️ To survive a Railway restart update `REPORT_HOUR_EST={hour}` in env vars.",
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
-
-
-# ── Scheduled job ─────────────────────────────────────────────────────────────
-
-async def scheduled_report(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = REPORT_CHAT_ID or next(iter(ADMIN_IDS), 0)
-    if not chat_id:
-        logger.error("No REPORT_CHAT_ID set")
-        return
-    filter_key = "full"
-    if context.job and context.job.data:
-        filter_key = context.job.data.get("filter_key", "full")
-    else:
-        filter_key = context.bot_data.get("scheduled_filter", "full")
-    logger.info(f"Scheduled report → chat {chat_id} | filter: {filter_key}")
-    await send_report(context.application, int(chat_id), filter_key=filter_key, triggered_by="scheduled")
-
-
-# ── /schedule status ──────────────────────────────────────────────────────────
-
-async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only.")
-        return
-    chat_id      = REPORT_CHAT_ID or context.bot_data.get("override_chat_id") or next(iter(ADMIN_IDS), 0)
-    filter_key   = context.bot_data.get("scheduled_filter", "full")
-    hour         = context.bot_data.get("scheduled_hour", REPORT_HOUR_EST)
-    label, _     = FILTERS.get(filter_key, FILTERS["full"])
-    display_hour = f"{hour}:00 AM" if hour < 12 else ("12:00 PM" if hour == 12 else f"{hour-12}:00 PM")
-    jobs         = context.job_queue.get_jobs_by_name("daily_report")
-    job_line     = f"Next run: {jobs[0].next_t}" if jobs else "No job active"
-    await update.message.reply_text(
-        f"⏰ *Schedule Status*\n\n"
-        f"Time: *{display_hour} EST*\n"
-        f"Filter: *{label}*\n"
-        f"Destination: `{chat_id}`\n"
-        f"{job_line}\n\n"
-        f"Use /setschedule to change.",
-        parse_mode="Markdown"
-    )
-
-
-# ── /start ────────────────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = update.effective_user.id in ADMIN_IDS
-    admin_block = (
-        "\n\n*Admin commands:*\n"
-        "/report — Pull a report now (choose filter)\n"
-        "/setschedule — Set daily report time + filter\n"
-        "/schedule — View current schedule\n"
-        "/setchat — Set this chat as report destination\n"
-        "/test — Quick API connectivity test"
-    ) if is_admin else ""
-    await update.message.reply_text(
-        "👋 *iGamer Morning Market Report Bot*\n\n"
-        "Daily Best Buy market intelligence for your sales team.\n\n"
-        "Report filters:\n"
-        "⚡ Full Report — everything\n"
-        "🔴 HOT BUYS — on sale + all signals\n"
-        "🔥 Trending Now — spiking last 3hrs\n"
-        "👁 Most Viewed — sustained 48hr views\n"
-        "🛒 Best Sellers — actual sales, 7 days\n"
-        "💰 On Sale Only — discounted, best % first"
-        + admin_block,
-        parse_mode="Markdown"
-    )
-
-
-# ── /setchat ──────────────────────────────────────────────────────────────────
-
-async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only.")
-        return
-    chat_id = update.effective_chat.id
-    chat_title = update.effective_chat.title or "this chat"
-    context.bot_data["override_chat_id"] = chat_id
-    await update.message.reply_text(
-        f"✅ *Report destination set!*\n\nChat: *{chat_title}*\nID: `{chat_id}`\n\n"
-        f"⚠️ Make permanent: set `REPORT_CHAT_ID={chat_id}` in Railway.",
-        parse_mode="Markdown"
-    )
-
-
-# ── /test ─────────────────────────────────────────────────────────────────────
-
-async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only.")
-        return
-    await update.message.reply_text("🔌 Testing Best Buy API connection...")
-    try:
-        ok, count, sample = await fetcher.test_connection()
-        if ok:
-            await update.message.reply_text(
-                f"✅ *Best Buy API — Connected*\n\nReturned {count} products\nSample: _{sample}_",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(f"❌ API test failed: {count}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Exception: `{e}`", parse_mode="Markdown")
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    app.job_queue.run_daily(
-        scheduled_report,
-        time=dtime(hour=REPORT_HOUR_EST, minute=0, tzinfo=EST),
-        name="daily_report",
-        data={"filter_key": "full"}
-    )
-    logger.info(f"Daily report scheduled at {REPORT_HOUR_EST}:00 AM EST")
-
-    report_conv = ConversationHandler(
-        entry_points=[CommandHandler("report", report_cmd)],
-        states={PICK_FILTER: [CallbackQueryHandler(report_filter_callback, pattern="^rep_")]},
-        fallbacks=[],
-        per_message=False,
-    )
-
-    schedule_conv = ConversationHandler(
-        entry_points=[CommandHandler("setschedule", setschedule_cmd)],
-        states={
-            PICK_FILTER: [
-                CallbackQueryHandler(schedule_filter_callback, pattern="^sch_"),
-                CallbackQueryHandler(schedule_time_callback,   pattern="^schtime_"),
-            ],
-        },
-        fallbacks=[],
-        per_message=False,
-    )
-
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("schedule",    schedule_cmd))
-    app.add_handler(CommandHandler("setchat",     setchat_cmd))
-    app.add_handler(CommandHandler("test",        test_cmd))
-    app.add_handler(report_conv)
-    app.add_handler(schedule_conv)
-
-    logger.info("iGamer Morning Report bot started.")
-    app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
+    async def test_connection(self) -> tuple:
+        async with aiohttp.ClientSession() as session:
+            url    = f"{BB_BASE}/products(search=laptop)"
+            params = {"apiKey": self.api_key, "format": "json", "show": "sku,name,salePrice", "pageSize": "3"}
+            try:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 403:
+                        return False, "API key invalid or rate limited (403)", ""
+                    if resp.status != 200:
+                        txt = await resp.text()
+                        return False, f"HTTP {resp.status}: {txt[:100]}", ""
+                    data     = await resp.json()
+                    products = data.get("products", [])
+                    if products:
+                        name, cat_id = CATEGORIES[0]
+                        cat_products = await self._fetch_category(session, name, cat_id)
+                        sample       = products[0].get("name", "—")[:60]
+                        return True, len(products), f"{sample} | Category [{name}]: {len(cat_products)} products"
+                    return False, "API connected but no products returned", ""
+            except Exception as e:
+                return False, f"Connection error: {e}", ""
