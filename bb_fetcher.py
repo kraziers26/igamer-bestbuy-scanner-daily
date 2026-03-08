@@ -17,7 +17,7 @@ CATEGORIES = [
 SHOW_FIELDS = ",".join([
     "sku", "name", "manufacturer", "salePrice", "regularPrice",
     "dollarSavings", "percentSavings", "onSale", "onlineAvailability",
-    "url", "bestSellingRank", "priceUpdateDate", "condition"
+    "url", "bestSellingRank", "priceUpdateDate"
 ])
 
 # How many products to pull per category into the pool.
@@ -97,10 +97,7 @@ class BBFetcher:
                     return []
                 data = await resp.json()
                 products = data.get("products", [])
-                # Safety net: keep only New condition items
-                products = [p for p in products
-                            if (p.get("condition") or "New").strip().lower() in ("new", "")]
-                logger.info(f"  {name}: {len(products)} New products in pool")
+                logger.info(f"  {name}: {len(products)} products in pool")
                 return products
         except Exception as e:
             logger.error(f"Fetch error [{name}]: {e}")
