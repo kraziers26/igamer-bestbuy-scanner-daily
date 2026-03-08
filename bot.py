@@ -30,12 +30,12 @@ EST = pytz.timezone("US/Eastern")
 fetcher = BBFetcher(BESTBUY_API_KEY)
 
 FILTERS = {
-    "full":     ("⚡ Full Report",    "Everything — all categories, all products, full Excel"),
-    "trending": ("🔥 Trending Now",   "Products spiking in page views in the last 3 hours"),
-    "viewed":   ("👁 Most Viewed",    "Products with highest sustained views over 48 hours"),
-    "selling":  ("🛒 Best Sellers",   "Products ranked by actual purchases over the last 7 days"),
-    "on_sale":  ("💰 On Sale Only",   "Only products currently discounted — sorted by best % off"),
-    "hot":      ("🔴 HOT BUYS Only", "Products that are on sale AND have all 3 signals firing"),
+    "full":     ("⚡ Full Report",      "Everything — all categories, full Excel with fresh deal scores"),
+    "trending": ("🆕 Fresh Deals",      "Newest price drops — sorted by how recently the price changed"),
+    "viewed":   ("🛒 BB Best Sellers",  "Category bestsellers direct from Best Buy's most popular list"),
+    "selling":  ("🛒 Best Sellers",     "Products sorted by Best Buy global best seller rank"),
+    "on_sale":  ("💰 On Sale Only",     "Only products currently discounted — sorted by best % off"),
+    "hot":      ("🔴 HOT BUYS Only",   "Fresh price drop + deep discount — highest conviction buys"),
 }
 
 
@@ -95,16 +95,16 @@ async def send_report(app, chat_id, filter_key="full", triggered_by="scheduled")
 def filter_keyboard(prefix):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⚡ Full Report",    callback_data=f"{prefix}_full"),
-            InlineKeyboardButton("🔴 HOT BUYS Only", callback_data=f"{prefix}_hot"),
+            InlineKeyboardButton("⚡ Full Report",     callback_data=f"{prefix}_full"),
+            InlineKeyboardButton("🔴 HOT BUYS Only",  callback_data=f"{prefix}_hot"),
         ],
         [
-            InlineKeyboardButton("🔥 Trending Now",  callback_data=f"{prefix}_trending"),
-            InlineKeyboardButton("👁 Most Viewed",   callback_data=f"{prefix}_viewed"),
+            InlineKeyboardButton("🆕 Fresh Deals",    callback_data=f"{prefix}_trending"),
+            InlineKeyboardButton("🛒 BB Best Sellers",callback_data=f"{prefix}_viewed"),
         ],
         [
-            InlineKeyboardButton("🛒 Best Sellers",  callback_data=f"{prefix}_selling"),
-            InlineKeyboardButton("💰 On Sale Only",  callback_data=f"{prefix}_on_sale"),
+            InlineKeyboardButton("💰 On Sale Only",   callback_data=f"{prefix}_on_sale"),
+            InlineKeyboardButton("🛒 Best Sellers",   callback_data=f"{prefix}_selling"),
         ],
         [InlineKeyboardButton("❌ Cancel",           callback_data=f"{prefix}_cancel")],
     ])
