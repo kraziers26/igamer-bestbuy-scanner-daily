@@ -17,7 +17,7 @@ CATEGORIES = [
 SHOW_FIELDS = ",".join([
     "sku", "name", "manufacturer", "salePrice", "regularPrice",
     "dollarSavings", "percentSavings", "onSale", "onlineAvailability",
-    "url", "bestSellingRank", "priceUpdateDate"
+    "url", "bestSellingRank", "priceUpdateDate", "condition"
 ])
 
 # How many products to pull per category into the pool.
@@ -80,13 +80,14 @@ class BBFetcher:
         return output
 
     async def _fetch_category(self, session, name: str, cat_id: str) -> list:
-        url = f"{BB_BASE}/products(categoryPath.id={cat_id}&condition=New)"
+        url = f"{BB_BASE}/products(categoryPath.id={cat_id})"
         params = {
-            "apiKey":   self.api_key,
-            "format":   "json",
-            "show":     SHOW_FIELDS,
-            "sort":     "bestSellingRank.asc",
-            "pageSize": str(POOL_SIZE),
+            "apiKey":    self.api_key,
+            "format":    "json",
+            "show":      SHOW_FIELDS,
+            "sort":      "bestSellingRank.asc",
+            "pageSize":  str(POOL_SIZE),
+            "condition": "New",
         }
         logger.info(f"Fetching category: {name} ({cat_id}) — pool size {POOL_SIZE}")
         try:
@@ -97,7 +98,10 @@ class BBFetcher:
                     return []
                 data = await resp.json()
                 products = data.get("products", [])
-                logger.info(f"  {name}: {len(products)} products in pool")
+                # Safety net: keep only New condition items
+                products = [p for p in products
+                            if (p.get("condition") or "New").strip().lower() in ("new", "")]
+                logger.info(f"  {name}: {len(products)} New products in pool")
                 return products
         except Exception as e:
             logger.error(f"Fetch error [{name}]: {e}")
