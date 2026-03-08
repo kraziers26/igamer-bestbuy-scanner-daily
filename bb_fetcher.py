@@ -111,66 +111,25 @@ class BBFetcher:
                 self._fetch_fresh_deals(session, name, cat_id)
                 for name, cat_id in CATEGORIES
             ]
-            bestseller_tasks = [
-                self._fetch_category_bestsellers(session, name, cat_id)
-                for name, cat_id in CATEGORIES
-            ]
 
-            cat_results  = await asyncio.gather(*category_tasks,    return_exceptions=True)
+            cat_results   = await asyncio.gather(*category_tasks,   return_exceptions=True)
             fresh_results = await asyncio.gather(*fresh_deal_tasks, return_exceptions=True)
-            bs_results   = await asyncio.gather(*bestseller_tasks,  return_exceptions=True)
 
         output = {}
         for i, (name, _) in enumerate(CATEGORIES):
             cat_products   = cat_results[i]   if not isinstance(cat_results[i],   Exception) else []
             fresh_products = fresh_results[i] if not isinstance(fresh_results[i], Exception) else []
-            bs_products    = bs_results[i]    if not isinstance(bs_results[i],    Exception) else []
 
             if isinstance(cat_results[i],   Exception): logger.error(f"Category fetch failed [{name}]: {cat_results[i]}")
             if isinstance(fresh_results[i], Exception): logger.error(f"Fresh deals fetch failed [{name}]: {fresh_results[i]}")
-            if isinstance(bs_results[i],    Exception): logger.error(f"Bestseller fetch failed [{name}]: {bs_results[i]}")
 
-            # Build category bestseller rank map (category-specific, not global)
-            cat_bs_rank = {p.get("sku"): idx+1 for idx, p in enumerate(bs_products)}
-
-            # Annotate category pool with fresh deal score + category BS rank
-            for p in cat_products:
-                sku = p.get("sku")
-                bs_global   = p.get("bestSellingRank")
-                bs_cat_rank = cat_bs_rank.get(sku)
-                p["fresh_score"]       = fresh_deal_score(p)
-                p["freshness_label"]   = deal_freshness_label(p)
-                p["best_seller_rank"]  = bs_global
-                p["cat_bs_rank"]       = bs_cat_rank
-                # Show category rank if available, fall back to global
-                if bs_cat_rank:
-                    p["best_seller_str"] = f"🛒 #{bs_cat_rank} in cat"
-                elif bs_global:
-                    p["best_seller_str"] = f"🛒 #{bs_global} global"
-                else:
-                    p["best_seller_str"] = "—"
-                # Keep these for backwards compat with report_builder
-                p["trending_rank"]    = None
-                p["most_viewed_rank"] = None
-                p["trending_str"]     = "—"
-                p["most_viewed_str"]  = "—"
-
-            # Annotate fresh deals pool
-            fresh_skus = {p.get("sku") for p in cat_products}
-            for p in fresh_products:
-                sku = p.get("sku")
-                bs_global   = p.get("bestSellingRank")
-                bs_cat_rank = cat_bs_rank.get(sku)
+            # Annotate category pool with fresh deal score + global BS rank
+            for p in cat_products + fresh_products:
+                bs = p.get("bestSellingRank")
                 p["fresh_score"]      = fresh_deal_score(p)
                 p["freshness_label"]  = deal_freshness_label(p)
-                p["best_seller_rank"] = bs_global
-                p["cat_bs_rank"]      = bs_cat_rank
-                if bs_cat_rank:
-                    p["best_seller_str"] = f"🛒 #{bs_cat_rank} in cat"
-                elif bs_global:
-                    p["best_seller_str"] = f"🛒 #{bs_global} global"
-                else:
-                    p["best_seller_str"] = "—"
+                p["best_seller_rank"] = bs
+                p["best_seller_str"]  = f"🛒 #{bs}" if bs else "—"
                 p["trending_rank"]    = None
                 p["most_viewed_rank"] = None
                 p["trending_str"]     = "—"
@@ -180,7 +139,6 @@ class BBFetcher:
                 "products":       cat_products[:DISPLAY_SIZE],  # top 10 for full report
                 "pool":           cat_products,                  # full pool for on_sale/hot filters
                 "fresh_products": fresh_products,                # sorted by priceUpdateDate desc
-                "bs_products":    bs_products,                   # category bestseller list
             }
 
         return output
@@ -257,55 +215,6 @@ class BBFetcher:
                 return products
         except Exception as e:
             logger.error(f"Fresh deals fetch error [{name}]: {e}")
-            return []
-
-    async def _fetch_category_bestsellers(self, session, name: str, cat_id: str) -> list:
-        """
-        Fetch the category-specific bestseller list using BB's mostPopular
-        recommendations endpoint. Returns products in bestseller rank order.
-        """
-        url    = f"{BB_BASE}/products/mostPopular(categoryId={cat_id})"
-        params = {
-            "apiKey":   self.api_key,
-            "format":   "json",
-            "show":     "sku,rank",
-            "pageSize": "10",
-        }
-        logger.info(f"Fetching category bestsellers: {name}")
-        try:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    logger.warning(f"  {name} bestsellers: {resp.status}")
-                    return []
-                data  = await resp.json()
-                items = data.get("results") or data.get("products") or []
-                skus  = [item.get("sku") for item in items if item.get("sku")]
-
-                if not skus:
-                    return []
-
-                # Look up full product details for these SKUs
-                sku_filter  = ",".join(str(s) for s in skus)
-                prod_url    = f"{BB_BASE}/products(sku in({sku_filter}))"
-                prod_params = {
-                    "apiKey":   self.api_key,
-                    "format":   "json",
-                    "show":     SHOW_FIELDS,
-                    "pageSize": "10",
-                }
-                async with session.get(prod_url, params=prod_params, timeout=aiohttp.ClientTimeout(total=15)) as presp:
-                    if presp.status != 200:
-                        return []
-                    pdata    = await presp.json()
-                    products = [p for p in pdata.get("products", []) if is_new(p)]
-
-                # Re-sort by original rank order from mostPopular
-                sku_order = {str(sku): idx for idx, sku in enumerate(skus)}
-                products.sort(key=lambda p: sku_order.get(str(p.get("sku")), 99))
-                logger.info(f"  {name} bestsellers: {len(products)} products")
-                return products
-        except Exception as e:
-            logger.warning(f"  {name} bestsellers fetch error: {e}")
             return []
 
     async def test_connection(self) -> tuple:
