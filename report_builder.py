@@ -44,23 +44,43 @@ def left(wrap=False):
 # ── Signal scoring ─────────────────────────────────────────────────────────────
 
 def signal_score(p: dict) -> int:
+    """
+    Fresh Deal Score — replaces old trending/most-viewed signal score.
+    Scores products by deal freshness + discount depth.
+    """
     score = 0
-    tr = p.get("trending_rank")
-    mv = p.get("most_viewed_rank")
-    bs = p.get("best_seller_rank")
-    if tr and tr <= 10: score += 3
-    if mv and mv <= 10: score += 2
-    if bs and bs <= 10: score += 2
+    # Use pre-computed fresh_score if available (set by fetcher)
+    if "fresh_score" in p:
+        return p["fresh_score"]
+    # Fallback: compute inline
+    from datetime import datetime
+    price_date = p.get("priceUpdateDate")
+    if price_date:
+        try:
+            dt   = datetime.fromisoformat(price_date.replace("Z", "+00:00"))
+            now  = datetime.now(dt.tzinfo)
+            days = (now - dt).days
+            if days == 0:    score += 4
+            elif days <= 2:  score += 3
+            elif days <= 7:  score += 1
+        except Exception:
+            pass
     if p.get("onSale"):  score += 2
     pct = float(p.get("percentSavings") or 0)
-    if pct >= 15: score += 2
-    elif pct >= 5: score += 1
+    if pct >= 20:   score += 3
+    elif pct >= 10: score += 2
+    elif pct >= 5:  score += 1
+    save_d = float(p.get("dollarSavings") or 0)
+    if save_d >= 300:   score += 2
+    elif save_d >= 100: score += 1
+    bs = p.get("bestSellingRank")
+    if bs and bs <= 500: score += 1
     return score
 
 def hot_label(score: int) -> str:
-    if score >= 9: return "🔴 HOT BUY"
-    if score >= 6: return "🟠 Strong"
-    if score >= 3: return "🟡 Moderate"
+    if score >= 9:  return "🔴 HOT BUY"
+    if score >= 6:  return "🟠 Strong"
+    if score >= 3:  return "🟡 Moderate"
     return "⚪ Watch"
 
 def row_bg(p: dict) -> str:
@@ -104,10 +124,9 @@ def write_title_rows(ws, title: str, ts: str, ncols: int):
     c = ws["A2"]
     c.value     = (
         f"Generated: {ts}   •   "
-        "🔥 Trending = spike in last 3hrs   "
-        "👁 Most Viewed = 48hr window   "
-        "🛒 Best Seller = 7d purchases   •   "
-        "🔴 HOT BUY = on sale + all 3 signals"
+        "🟢 Fresh Deal = price dropped today/this week   "
+        "🛒 Best Seller = category rank via BB   •   "
+        "🔴 HOT BUY = fresh price drop + deep discount"
     )
     c.font      = Font(name="Arial", size=9, italic=True, color=C_WHITE)
     c.fill      = fill(C_MID_BLUE)
@@ -129,21 +148,20 @@ def write_col_headers(ws, headers_widths: list, row: int, hdr_color: str = C_DAR
 # ── Category sheet ─────────────────────────────────────────────────────────────
 
 CAT_HEADERS = [
-    ("RANK",           5),
-    ("BRAND",          10),
-    ("PRODUCT NAME",   55),
-    ("SALE PRICE",     12),
-    ("REG PRICE",      12),
-    ("SAVE $",         10),
-    ("SAVE %",         10),
-    ("ON SALE?",       10),
-    ("IN STOCK?",      10),
-    ("🔥 TRENDING",    12),
-    ("👁 MOST VIEWED", 13),
-    ("🛒 BEST SELLER", 13),
-    ("SIGNAL",         13),
-    ("DEAL AGE",       15),
-    ("BUY LINK",       16),
+    ("RANK",            5),
+    ("BRAND",           10),
+    ("PRODUCT NAME",    55),
+    ("SALE PRICE",      12),
+    ("REG PRICE",       12),
+    ("SAVE $",          10),
+    ("SAVE %",          10),
+    ("ON SALE?",        10),
+    ("IN STOCK?",       10),
+    ("🛒 BB RANK",      14),
+    ("FRESH SCORE",     12),
+    ("SIGNAL",          13),
+    ("DEAL AGE",        15),
+    ("BUY LINK",        16),
 ]
 
 def build_category_sheet(wb, cat_name: str, products: list, ts: str):
@@ -175,9 +193,8 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
             f"{save_pct:.1f}%" if save_pct > 0 else "—",
             "✅ Yes" if on_sale else "❌ No",
             "✅ Yes" if in_stock else "❌ No",
-            p.get("trending_str", "—"),
-            p.get("most_viewed_str", "—"),
             p.get("best_seller_str", "—"),
+            f"{sc}/13",
             hot_label(sc),
             age,
             "🛒 Buy Now",
@@ -188,7 +205,7 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
             c.fill   = fill(bg)
             c.border = BORDER_THIN
 
-            if col == 15:  # buy link
+            if col == 14:  # buy link
                 if url:
                     c.hyperlink = url
                 c.font      = Font(name="Arial", size=9, bold=True,
@@ -278,7 +295,7 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
 
     ws.merge_cells(f"A2:{get_column_letter(SUMMARY_NCOLS)}2")
     c = ws["A2"]
-    filter_labels = {"full":"⚡ Full Report","trending":"🔥 Trending Now","viewed":"👁 Most Viewed","selling":"🛒 Best Sellers","on_sale":"💰 On Sale Only","hot":"🔴 HOT BUYS Only"}
+    filter_labels = {"full":"⚡ Full Report","trending":"🆕 Fresh Deals","viewed":"🛒 BB Best Sellers","selling":"🛒 Best Sellers","on_sale":"💰 On Sale Only","hot":"🔴 HOT BUYS Only"}
     filter_label = filter_labels.get(filter_key, "⚡ Full Report")
     c.value     = (f"Generated: {ts}   •   Filter: {filter_label}   •   Live data from Best Buy Products & Recommendations API")
     c.font      = Font(name="Arial", size=9, italic=True, color=C_WHITE)
@@ -354,7 +371,7 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
     # ════════════════
     # Section 2 — Top Deals
     # ════════════════
-    ROW = section_hdr(ws, ROW, "  🏆  TODAY'S TOP DEALS  —  Ranked by signal strength + discount", "1E5631")
+    ROW = section_hdr(ws, ROW, "  🏆  TODAY'S TOP DEALS  —  Ranked by deal freshness + discount depth", "1E5631")
 
     deal_headers = [
         ("#",4),("TIER",14),("BRAND",12),("CATEGORY",16),("PRODUCT",44),
@@ -392,27 +409,29 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
 
     def signals_str(p):
         parts = []
-        tr = p.get("trending_rank")
-        mv = p.get("most_viewed_rank")
-        bs = p.get("best_seller_rank")
-        if tr and tr <= 10: parts.append(f"🔥 Trend#{tr}")
-        if mv and mv <= 10: parts.append(f"👁 View#{mv}")
-        if bs and bs <= 10: parts.append(f"🛒 Sell#{bs}")
+        bs_str = p.get("best_seller_str", "")
+        if bs_str and bs_str != "—": parts.append(bs_str)
+        pct = float(p.get("percentSavings") or 0)
+        if pct > 0: parts.append(f"💰 {pct:.0f}% off")
         if p.get("onSale"):  parts.append("On Sale")
+        fl = p.get("freshness_label") or p.get("_freshness", "")
+        if fl and fl != "—": parts.append(fl)
         return " • ".join(parts) or "—"
 
     def why_str(p):
         parts = []
         sc   = p["_score"]
         pct  = p["_pct"]
-        tr   = p.get("trending_rank")
-        bs   = p.get("best_seller_rank")
-        if sc >= 9:   parts.append("All signals + discount")
-        elif sc >= 6: parts.append("Multiple signals")
+        save_d = float(p.get("dollarSavings") or 0)
+        bs_str = p.get("best_seller_str", "")
+        fl     = p.get("freshness_label", "")
+        if sc >= 9:   parts.append("Fresh drop + deep cut")
+        elif sc >= 6: parts.append("Good deal, act soon")
         if pct >= 20:   parts.append(f"{pct:.0f}% off — deep cut")
         elif pct >= 10: parts.append(f"{pct:.0f}% off")
-        if tr == 1:  parts.append("#1 trending")
-        if bs == 1:  parts.append("Best seller #1")
+        if save_d >= 200: parts.append(f"${save_d:.0f} saved")
+        if bs_str and bs_str != "—": parts.append(bs_str)
+        if fl and "New" in fl: parts.append("Price just dropped")
         if not p.get("onlineAvailability", True): parts.append("⚠️ check stock")
         return " | ".join(parts) or "—"
 
@@ -484,14 +503,13 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
     # ════════════════
     ROW = section_hdr(ws, ROW, "  🔑  SIGNAL KEY")
     legend = [
-        ("🔴 HOT BUY",     "On sale + all 3 signals firing — strongest possible buy signal",  C_RED_BG,    C_RED_DARK),
-        ("🟠 Strong",      "Multiple signals align — strong sourcing candidate",               C_YELLOW_BG, C_YELLOW_DARK),
-        ("🟡 Moderate",    "1-2 signals — keep on radar",                                     C_GREY_HDR,  "555555"),
-        ("⚪ Watch",       "No strong signals currently",                                      C_WHITE,     "888888"),
-        ("🔥 Trending",    "Page view spike in last 3 hours on BestBuy.com",                  C_WHITE,     "000000"),
-        ("👁 Most Viewed", "Consistently high page views over last 48 hours",                 C_WHITE,     "000000"),
-        ("🛒 Best Seller", "Ranked by actual purchases over last 7 days",                     C_WHITE,     "000000"),
-        ("DEAL AGE",       "🟢 New (0-2d)  🟡 Active (3-7d)  🟠 Aging (8-14d)  🔴 Ending? (15d+)", C_SUMMARY_ALT, "1F4E79"),
+        ("🔴 HOT BUY",    "Fresh price drop (≤2 days) + deep discount (10%+) — act now",     C_RED_BG,    C_RED_DARK),
+        ("🟠 Strong",     "Good discount + reasonably fresh — strong sourcing candidate",      C_YELLOW_BG, C_YELLOW_DARK),
+        ("🟡 Moderate",   "On sale but older deal or shallow discount — keep on radar",        C_GREY_HDR,  "555555"),
+        ("⚪ Watch",      "No discount or deal is stale — monitor only",                       C_WHITE,     "888888"),
+        ("FRESH SCORE",   "0-13 pts: freshness (4) + on sale (2) + discount % (3) + $ saved (2) + proven product (1)", C_SUMMARY_ALT, "1F4E79"),
+        ("🛒 BB RANK",    "Category rank = BB mostPopular for that category. Global rank shown if category rank unavailable", C_WHITE, "000000"),
+        ("DEAL AGE",      "🟢 New (0-2d)  🟡 Active (3-7d)  🟠 Aging (8-14d)  🔴 Old (15d+)", C_SUMMARY_ALT, "1F4E79"),
     ]
     for lbl, desc, bg_c, txt_c in legend:
         ws.merge_cells(f"A{ROW}:C{ROW}")
@@ -523,19 +541,17 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
             result = products
 
         elif filter_key == "trending":
-            # Use products fetched directly from the trendingViewed signal endpoint
-            result = cat_data.get("trending_products") or []
+            # Fresh Deals — products with newest price drops, sorted by fresh_deal_score
+            result = cat_data.get("fresh_products") or []
             if not result:
-                # fallback: find any annotated trending items in pool
-                result = [p for p in pool if p.get("trending_rank")]
-                result.sort(key=lambda p: p.get("trending_rank") or 99)
+                result = sorted(pool, key=lambda p: signal_score(p), reverse=True)
 
         elif filter_key == "viewed":
-            # Use products fetched directly from the mostViewed signal endpoint
-            result = cat_data.get("most_viewed_products") or []
+            # Category Bestsellers — from BB mostPopular endpoint
+            result = cat_data.get("bs_products") or []
             if not result:
-                result = [p for p in pool if p.get("most_viewed_rank")]
-                result.sort(key=lambda p: p.get("most_viewed_rank") or 99)
+                result = [p for p in pool if p.get("best_seller_rank")]
+                result.sort(key=lambda p: p.get("best_seller_rank") or 9999)
 
         elif filter_key == "selling":
             result = [p for p in pool if p.get("best_seller_rank")]
@@ -553,10 +569,10 @@ def apply_filter(all_data: dict, filter_key: str) -> dict:
             result = products
 
         filtered[cat_name] = {
-            "products":              result,
-            "pool":                  pool,
-            "trending_products":     cat_data.get("trending_products", []),
-            "most_viewed_products":  cat_data.get("most_viewed_products", []),
+            "products":       result,
+            "pool":           pool,
+            "fresh_products": cat_data.get("fresh_products", []),
+            "bs_products":    cat_data.get("bs_products", []),
         }
 
     return filtered
