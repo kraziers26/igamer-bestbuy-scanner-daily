@@ -20,6 +20,8 @@ C_GREY_HDR    = "D9E1F2"
 C_ORANGE      = "ED7D31"
 C_LINK        = "0563C1"
 C_SUMMARY_ALT = "EBF3FB"
+C_PURPLE_BG   = "EDE7F6"
+C_PURPLE_DARK = "4A148C"
 
 THIN        = Side(style="thin",   color="CCCCCC")
 MED         = Side(style="medium", color="AAAAAA")
@@ -85,6 +87,9 @@ def hot_label(score: int) -> str:
 
 def row_bg(p: dict) -> str:
     if not p.get("onlineAvailability", True): return "EEEEEE"
+    offer_type = p.get("offer_type") or ""
+    if offer_type == "Clearance":      return C_PURPLE_BG
+    if offer_type == "Deal of the Day": return "FFF8E1"
     sc = signal_score(p)
     if sc >= 9: return "FFE8E8"
     pct = float(p.get("percentSavings") or 0)
@@ -125,7 +130,7 @@ def write_title_rows(ws, title: str, ts: str, ncols: int):
     c.value     = (
         f"Generated: {ts}   •   "
         "🟢 Fresh Deal = price dropped today/this week   "
-        "🛒 Best Seller = category rank via BB   •   "
+        "🎯 Deal of the Day = BB editorial pick, 24hr   "
         "🔴 HOT BUY = fresh price drop + deep discount"
     )
     c.font      = Font(name="Arial", size=9, italic=True, color=C_WHITE)
@@ -159,6 +164,7 @@ CAT_HEADERS = [
     ("IN STOCK?",       10),
     ("🛒 BB RANK",      14),
     ("FRESH SCORE",     12),
+    ("OFFER TYPE",      16),
     ("SIGNAL",          13),
     ("DEAL AGE",        15),
     ("BUY LINK",        16),
@@ -186,6 +192,8 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
         url        = p.get("url", "")
         age        = deal_age(p.get("priceUpdateDate"))
 
+        offer_label = p.get("offer_label") or "—"
+        offer_type  = p.get("offer_type") or ""
         vals = [
             rank, brand, name,
             sale_price, reg_price if reg_price != sale_price else "—",
@@ -195,6 +203,7 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
             "✅ Yes" if in_stock else "❌ No",
             p.get("best_seller_str", "—"),
             f"{sc}/13",
+            offer_label,
             hot_label(sc),
             age,
             "🛒 Buy Now",
@@ -205,7 +214,7 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
             c.fill   = fill(bg)
             c.border = BORDER_THIN
 
-            if col == 14:  # buy link
+            if col == 15:  # buy link
                 if url:
                     c.hyperlink = url
                 c.font      = Font(name="Arial", size=9, bold=True,
@@ -227,6 +236,17 @@ def build_category_sheet(wb, cat_name: str, products: list, ts: str):
                 c.font = Font(name="Arial", size=9, bold=True,
                               color=C_GREEN_DARK if save_pct >= 15 else
                               (C_YELLOW_DARK if save_pct > 0 else "888888"))
+                c.alignment = center()
+            elif col == 12:  # offer type
+                offer_colors = {
+                    "Deal of the Day": ("FFF8E1", "E65100"),
+                    "Clearance":       (C_PURPLE_BG, C_PURPLE_DARK),
+                    "Weekly Ad":       (C_GREEN_BG, C_GREEN_DARK),
+                    "Special Offer":   (C_SUMMARY_ALT, "1F4E79"),
+                }
+                ob, ot_c = offer_colors.get(offer_type, (C_WHITE, "888888"))
+                c.fill      = fill(ob)
+                c.font      = Font(name="Arial", size=9, bold=bool(offer_type), color=ot_c)
                 c.alignment = center()
             elif col == 13:  # signal label
                 c.font = Font(name="Arial", size=9, bold=True,
@@ -409,11 +429,13 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
 
     def signals_str(p):
         parts = []
+        offer_label = p.get("offer_label") or ""
+        if offer_label: parts.append(offer_label)
         bs_str = p.get("best_seller_str", "")
         if bs_str and bs_str != "—": parts.append(bs_str)
         pct = float(p.get("percentSavings") or 0)
         if pct > 0: parts.append(f"💰 {pct:.0f}% off")
-        if p.get("onSale"):  parts.append("On Sale")
+        if p.get("onSale"): parts.append("On Sale")
         fl = p.get("freshness_label") or p.get("_freshness", "")
         if fl and fl != "—": parts.append(fl)
         return " • ".join(parts) or "—"
@@ -425,6 +447,10 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
         save_d = float(p.get("dollarSavings") or 0)
         bs_str = p.get("best_seller_str", "")
         fl     = p.get("freshness_label", "")
+        offer_type = p.get("offer_type") or ""
+        if offer_type == "Deal of the Day": parts.append("BB Deal of the Day")
+        elif offer_type == "Clearance":     parts.append("Clearance — move fast")
+        elif offer_type == "Weekly Ad":     parts.append("In this week's circular")
         if sc >= 9:   parts.append("Fresh drop + deep cut")
         elif sc >= 6: parts.append("Good deal, act soon")
         if pct >= 20:   parts.append(f"{pct:.0f}% off — deep cut")
@@ -503,13 +529,16 @@ def build_summary_sheet(wb, all_data: dict, ts: str, filter_key: str = "full"):
     # ════════════════
     ROW = section_hdr(ws, ROW, "  🔑  SIGNAL KEY")
     legend = [
-        ("🔴 HOT BUY",    "Fresh price drop (≤2 days) + deep discount (10%+) — act now",     C_RED_BG,    C_RED_DARK),
-        ("🟠 Strong",     "Good discount + reasonably fresh — strong sourcing candidate",      C_YELLOW_BG, C_YELLOW_DARK),
-        ("🟡 Moderate",   "On sale but older deal or shallow discount — keep on radar",        C_GREY_HDR,  "555555"),
-        ("⚪ Watch",      "No discount or deal is stale — monitor only",                       C_WHITE,     "888888"),
-        ("FRESH SCORE",   "0-13 pts: freshness (4) + on sale (2) + discount % (3) + $ saved (2) + proven product (1)", C_SUMMARY_ALT, "1F4E79"),
-        ("🛒 BB RANK",    "Category rank = BB mostPopular for that category. Global rank shown if category rank unavailable", C_WHITE, "000000"),
-        ("DEAL AGE",      "🟢 New (0-2d)  🟡 Active (3-7d)  🟠 Aging (8-14d)  🔴 Old (15d+)", C_SUMMARY_ALT, "1F4E79"),
+        ("🔴 HOT BUY",        "Fresh price drop (≤2 days) + deep discount (10%+) — act now",               C_RED_BG,    C_RED_DARK),
+        ("🟠 Strong",         "Good discount + reasonably fresh — strong sourcing candidate",               C_YELLOW_BG, C_YELLOW_DARK),
+        ("🟡 Moderate",       "On sale but older deal or shallow discount — keep on radar",                 C_GREY_HDR,  "555555"),
+        ("⚪ Watch",          "No discount or deal is stale — monitor only",                                C_WHITE,     "888888"),
+        ("DEAL OF THE DAY",   "BB editorial pick — valid 24hrs, expires 11:59pm CT. Auto-alerts regardless of score", "FFF8E1", "E65100"),
+        ("CLEARANCE",         "Extreme discount, limited units, no raincheck — move fast",                  C_PURPLE_BG, C_PURPLE_DARK),
+        ("WEEKLY AD",         "In BB Sunday circular — publicly promoted, runs 7 days",                    C_GREEN_BG,  C_GREEN_DARK),
+        ("SPECIAL OFFER",     "Bundle, gift-with-purchase, or financing promotion",                        C_SUMMARY_ALT, "1F4E79"),
+        ("FRESH SCORE",       "0-13+ pts: freshness(4) + on sale(2) + disc%(3) + $saved(2) + rank(1) + offer bonus(1-4)", C_SUMMARY_ALT, "1F4E79"),
+        ("DEAL AGE",          "🟢 New (0-2d)  🟡 Active (3-7d)  🟠 Aging (8-14d)  🔴 Old (15d+)",         C_SUMMARY_ALT, "1F4E79"),
     ]
     for lbl, desc, bg_c, txt_c in legend:
         ws.merge_cells(f"A{ROW}:C{ROW}")
